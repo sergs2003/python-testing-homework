@@ -23,4 +23,4 @@ UserAssertion: TypeAlias = Callable[[str, UserData], None]
 
 @final
 class ExternalAPIUserResponse(TypedDict, total=True):
-    external_id: str
+    id: str

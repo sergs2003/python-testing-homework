@@ -1,6 +1,7 @@
 import json
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Iterator, Protocol, Unpack, final
+from urllib.parse import urljoin
 
 import httpretty
 import pytest
@@ -40,6 +41,7 @@ def registration_data_factory() -> RegistrationDataFactory:
             'address': field('address.city'),
             'job_title': field('person.occupation'),
             'phone': field('person.telephone'),
+            'lead_id': field('numeric.increment'),
         })
         return {
             **schema.create()[0],
@@ -77,9 +79,13 @@ def user_data(registration_data: 'RegistrationData') -> 'UserData':
 
 
 @pytest.fixture()
-def user(django_user_model: models.Model):
+def user(django_user_model: models.Model, registration_data: 'RegistrationData'):
+    password = registration_data['password1']
+    registration_data.pop('password1')
+    registration_data.pop('password2')
     return django_user_model.objects.create_user(  # noqa: S106
-        email='user1@example.com', password='password1',
+        # email='user1@example.com', password='password1',
+        password=password, **registration_data
     )
 
 
@@ -90,26 +96,41 @@ def user_client(client: Client, user) -> Client:
 
 
 @pytest.fixture()
-def external_api_user_response() -> 'ExternalAPIUserResponse':
+def external_api_create_user_response() -> 'ExternalAPIUserResponse':
     field = Field()
     schema = Schema(schema=lambda: {
-        'external_id': str(field('numeric.increment')),
+        'id': str(field('numeric.increment')),
     })
     return schema.create()[0]
 
 
 @pytest.fixture()
-@httpretty.activate
-def external_api_mock(
-    external_api_user_response: 'ExternalAPIUserResponse',
+def external_api_create_user_mock(
+    external_api_create_user_response,
 ) -> Iterator['ExternalAPIUserResponse']:
-    httpretty.register_uri(
-        method=httpretty.POST,
-        body=json.dumps(external_api_user_response),
-        uri=settings.PLACEHOLDER_API_URL,
-    )
-    yield external_api_user_response
-    assert httpretty.last_request()
+    with httpretty.enabled(allow_net_connect=False):
+        httpretty.register_uri(
+            method=httpretty.POST,
+            body=json.dumps(external_api_create_user_response),
+            uri=urljoin(settings.PLACEHOLDER_API_URL, '/users'),
+        )
+        yield external_api_create_user_response
+        assert httpretty.has_request()
+
+
+@pytest.fixture()
+def external_api_update_user_mock(
+    user: 'User',
+    external_api_create_user_response,
+) -> Iterator['ExternalAPIUserResponse']:
+    with httpretty.enabled(allow_net_connect=False):
+        httpretty.register_uri(
+            method=httpretty.PATCH,
+            body=json.dumps(external_api_create_user_response),
+            uri=urljoin(settings.PLACEHOLDER_API_URL, '/users/{0}'.format(user.lead_id)),
+        )
+        yield external_api_create_user_response
+        assert httpretty.has_request()
 
 
 @pytest.mark.django_db()
@@ -157,17 +178,9 @@ def test_user_can_open_user_update_page(user_client: Client):
 def test_user_can_update_their_info(
     user_client: Client,
     user: User,
-    external_api_mock: 'ExternalAPIUserResponse',
+    user_data: 'UserData',
+    external_api_update_user_mock: 'ExternalAPIUserResponse',
 ):
-    user_data = {
-        'first_name': 'new first name',
-        'last_name': 'new last name',
-        'date_of_birth': '01.01.1970',
-        'address': 'new address',
-        'job_title': 'new job title',
-        'phone': 'new phone number',
-    }
-
     response = user_client.post(reverse('identity:user_update'), data=user_data)
 
     assert response.status_code == HTTPStatus.FOUND
@@ -183,7 +196,7 @@ def test_registration_with_all_valid_fields(
     registration_data: 'RegistrationData',
     user_data: 'UserData',
     assert_correct_user: 'UserAssertion',
-    external_api_mock: 'ExternalAPIUserResponse',
+    external_api_create_user_mock: 'ExternalAPIUserResponse',
 ):
     response = client.post(reverse('identity:registration'), data=registration_data)
 
